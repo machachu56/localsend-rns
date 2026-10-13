@@ -1,3 +1,149 @@
+# LocalSend over Reticulum (RNS)
+
+This fork adds [Reticulum](https://reticulum.network) as a second transport to LocalSend. Besides the usual LAN discovery, devices can find each other and send files **through any Reticulum network** (a shared TCP node, a LoRa/serial link, ...), so they no longer need to be on the same Wi-Fi.
+
+This tutorial covers what is specific to this fork. The original LocalSend documentation follows after it.
+
+- [How it works](#how-it-works-rns)
+- [Quick start](#quick-start)
+- [1. Install](#1-install)
+- [2. Connect to a Reticulum network](#2-connect-to-a-reticulum-network)
+- [3. Optional: set a network password](#3-optional-set-a-network-password)
+- [4. Find devices and send files](#4-find-devices-and-send-files)
+- [Where things are stored](#where-things-are-stored)
+- [Troubleshooting](#troubleshooting-rns)
+
+## How it works (RNS)
+
+- Each device runs a small **bridge** (`rns_bridge.py`) that talks to Reticulum.
+  - **Linux / Windows / macOS:** the app starts `python3 rns_bridge.py` as a child process. You need Python 3 with the `rns` package.
+  - **Android:** Python and `rns` are embedded in the APK. Nothing to install.
+- Devices **announce** themselves on the network. A device only shows up in the list after a *live* announce from it. Cached peers are never shown, because a cached destination may be dead.
+- A file transfer opens an encrypted Reticulum link to the other device. The receiver has to accept first, exactly like in normal LocalSend.
+- Scanning is deliberately gentle: public Reticulum nodes silently drop announces that come too fast, so announces are spaced out (see [Troubleshooting](#troubleshooting-rns)).
+
+## Quick start
+
+1. Install the app on two devices ([step 1](#1-install)).
+2. On **both**, open **Settings → Advanced → Reticulum Network** and add the **same Reticulum node** as a TCP client interface ([step 2](#2-connect-to-a-reticulum-network)). **Restart the app.**
+3. On the **Send** tab, press the sync button. The other device appears with an **RNS** badge.
+4. Pick files, tap the device, accept on the other side.
+
+## 1. Install
+
+### Android
+
+Build the APK (JDK 17 or 21, Android SDK with platform 36):
+
+```bash
+cd app
+flutter build apk --release --target-platform android-arm64
+# output: app/build/app/outputs/flutter-apk/app-release.apk
+```
+
+- Use `--target-platform android-arm` (32-bit phones) or `android-x64` (emulators/tablets) for the other ABIs. Build one APK per ABI.
+- **Do not use `--split-per-abi`.** It conflicts with the embedded Python runtime (Chaquopy).
+- If there is no `app/android/key.properties`, create one pointing at a keystore, otherwise the release APK cannot be signed. The file is git-ignored.
+- The APK is large (about 130 MB) because Python ships for all ABIs.
+
+### Linux / macOS
+
+```bash
+pip install rns                      # the bridge needs it
+cd app
+flutter build linux --release        # or: flutter build macos --release
+cp ../rns_bridge.py build/linux/x64/release/bundle/
+```
+
+`rns_bridge.py` must sit **next to the executable** (the app also finds it in the current or parent directory when you run from the repo). Run `build/linux/x64/release/bundle/localsend_app`.
+
+### Windows
+
+Windows cannot be built from Linux. Use the GitHub Actions workflow **Build windows zip** (`.github/workflows/test_zip.yml`, run it manually with *Run workflow*). It produces `LocalSend.zip` with `rns_bridge.py` already next to the `.exe`.
+
+On the Windows machine you also need Python 3 in `PATH` and `pip install rns`.
+
+## 2. Connect to a Reticulum network
+
+Without extra configuration the app only creates an `AutoInterface`, which discovers peers on the **local network** (multicast). It does nothing if the device is not on the same LAN, for example a phone on mobile data. To reach other devices anywhere, connect both to a common Reticulum node.
+
+1. Open **Settings → Advanced → Reticulum Network**.
+2. Press **+** (Add Interface) and fill in:
+   - **Type:** `TCP Client` to connect to a node, or `TCP Server` to be the node.
+   - **Target host / port:** address of a Reticulum TCP node, e.g. one you run yourself.
+   - **Bandwidth (Mbit/s, optional):** a hint for RNS to size its packets. Empty uses the default (10 Mbit/s for TCP). `100` allows larger packets; it does not make the connection itself faster.
+3. **Restart the app.** Reticulum reads its configuration only at startup, so interface changes apply after a restart.
+
+Both devices must be connected to the **same node, or to nodes that are connected to each other**.
+
+To host your own node, add a `TCP Server` interface on a machine with a reachable IP/port (open the port in the firewall or forward it), and point every device's `TCP Client` at it. See the [Reticulum manual](https://markqvist.github.io/Reticulum/manual/) for details on interfaces.
+
+The same page shows **your RNS identity**: a QR code and your destination hash. That hash is what other devices use to reach you.
+
+## 3. Optional: set a network password
+
+By default anybody on the same Reticulum network who runs this app can see you and offer you files. A **network password** limits that to devices that know it.
+
+1. Open **Settings → Advanced → Reticulum Network**.
+2. Fill in **Network password** and press **Save**. It applies immediately, no restart.
+3. Use the **identical** password (case sensitive) on every device that should see each other.
+
+What it does:
+
+- The password is turned into a tag (PBKDF2-SHA256) that becomes part of your Reticulum destination. Devices with another password, or none, **never appear in your list**, and nobody can compute your destination or open a link to you without it.
+- Changing the password moves you to a new network. Old peers are removed from the list, and the devices you leave are told to forget you.
+- Leave it empty for an open network.
+
+What it does **not** do:
+
+- It does not encrypt files differently. Transfers are already encrypted by the Reticulum link; the password only controls who can find you and connect.
+- The tag travels in announces, so someone capturing them could try to brute-force a weak password offline. Use a long one.
+- The password is stored in the app preferences in plain text, like the other settings.
+- You cannot change it while a transfer is running.
+
+## 4. Find devices and send files
+
+1. Open the **Send** tab and press the **sync** button. Reticulum devices show an **RNS** badge.
+   - Starting the app already announces you, and other devices answer within seconds.
+   - A manual scan announces again, at most every 20 seconds. Automatic answers wait up to a minute.
+2. Choose files, then tap the device.
+3. The receiver sees the usual accept dialog. After accepting, the sender switches to the progress page.
+4. Received files are saved to the normal LocalSend destination.
+
+**Sending to a device that is not in the list:** use the **RNS Address** button on the Send tab and paste its destination hash (from its Reticulum Network page). The device has to be reachable on your network and use the same password.
+
+## Where things are stored
+
+| | Desktop | Android |
+|---|---|---|
+| Reticulum config | `~/.reticulum/config` (`%USERPROFILE%` on Windows) | app support directory, `.reticulum/config` |
+| Identity | `~/.localsend_reticulum_identity` | app support directory |
+| Received files (before saving) | system temp, `localsend_rns_staging` | app cache, `localsend_rns_staging` |
+
+Desktop shares `~/.reticulum` with other Reticulum software. Running a second Reticulum program on the same directory can produce harmless warnings such as a `FileNotFoundError` in `persist_job` for ratchets.
+
+## Troubleshooting (RNS)
+
+**The Reticulum Network page shows "Reticulum is not available".** The bridge did not start. The message says why. On desktop it is usually missing Python or `rns` (`pip install rns`) or `rns_bridge.py` not next to the executable.
+
+**I don't see the other device.**
+- Did you restart the app after adding an interface?
+- Are both devices on the same node (or connected nodes), with the **same password**?
+- A phone on mobile data has no LAN, so `AutoInterface` is useless there. You need a TCP interface.
+- After opening both apps within seconds of each other, one can take up to about a minute to see the other. Wait 20 seconds and press sync again.
+- Public nodes may drop announces that arrive too fast. Don't spam the sync button.
+
+**A device I changed the password on is still listed.** It disappears when the other device receives its goodbye, or on the next scan. If the app was force-closed, no goodbye is sent. Press sync to rebuild the list.
+
+**Large files are slow or fail.**
+- Reticulum over a public node starts slowly (small window) and the speed depends on the whole path.
+- Keep the phone's screen on and the app in the foreground during the transfer. Android can cut the network of apps in the background, which aborts the link.
+- Test with a smaller file first. Very large transfers over mobile data were not fully verified in this fork.
+
+**Android build fails with Gradle/AGP errors.** The project needs AGP 8.9.1 with compile SDK 36 (install platform 36) and Chaquopy 16.1.0 (Python 3.11, the last line that still supports 32-bit ABIs).
+
+---
+
 # LocalSend
 
 [![CI status][ci-badge]][ci-workflow]
