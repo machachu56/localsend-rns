@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  FLUTTER_VERSION: "3.35.6"
+  FLUTTER_VERSION: "3.38.10"
 
 jobs:
   build:
@@ -55,6 +55,9 @@ jobs:
           Copy-Item ../scripts/windows/x64/msvcp140.dll build/windows/x64/runner/Release/
           Copy-Item ../scripts/windows/x64/vcruntime140.dll build/windows/x64/runner/Release/
           Copy-Item ../scripts/windows/x64/vcruntime140_1.dll build/windows/x64/runner/Release/
+
+      - name: Add RNS bridge script
+        run: Copy-Item rns_bridge.py app/build/windows/x64/runner/Release/
 
       - name: Zip compiled files
         working-directory: app

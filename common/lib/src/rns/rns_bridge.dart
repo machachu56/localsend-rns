@@ -44,6 +44,7 @@ class RnsBridge {
     required String configPath,
     required String identityPath,
     required String stagingDir,
+    String password = '',
   }) async {
     if (_running) {
       _logger.warning('Bridge already running');
@@ -60,6 +61,7 @@ class RnsBridge {
       'config_path': configPath,
       'identity_path': identityPath,
       'staging_dir': stagingDir,
+      'password': password,
     });
   }
 
@@ -69,6 +71,7 @@ class RnsBridge {
     required String configPath,
     required String identityPath,
     required String stagingDir,
+    String password = '',
   }) async {
     if (_running) {
       _logger.warning('Bridge already running');
@@ -129,6 +132,7 @@ class RnsBridge {
       'config_path': configPath,
       'identity_path': identityPath,
       'staging_dir': stagingDir,
+      'password': password,
     });
   }
 
@@ -217,6 +221,11 @@ class RnsBridge {
 
   Future<void> getPeers() async {
     await sendCommand('get_peers', {});
+  }
+
+  /// Switches to the network of [password] (empty = open network).
+  Future<void> setPassword(String password) async {
+    await sendCommand('set_password', {'password': password});
   }
 
   /// User-initiated scan: replays cached peers and announces (rate limited by the bridge).

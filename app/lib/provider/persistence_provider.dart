@@ -57,6 +57,9 @@ const _receiveHistory = 'ls_receive_history';
 // Favorites
 const _favorites = 'ls_favorites';
 
+// Reticulum network password (empty = open network)
+const _rnsPassword = 'ls_rns_password';
+
 // App Window Offset and Size info
 const _windowOffsetX = 'ls_window_offset_x';
 const _windowOffsetY = 'ls_window_offset_y';
@@ -260,6 +263,16 @@ class PersistenceService {
   List<FavoriteDevice> getFavorites() {
     final favoritesRaw = _prefs.getStringList(_favorites) ?? [];
     return favoritesRaw.map((entry) => FavoriteDevice.fromJson(jsonDecode(entry))).toList();
+  }
+
+  String getRnsPassword() => _prefs.getString(_rnsPassword) ?? '';
+
+  Future<void> setRnsPassword(String password) async {
+    if (password.isEmpty) {
+      await _prefs.remove(_rnsPassword);
+    } else {
+      await _prefs.setString(_rnsPassword, password);
+    }
   }
 
   Future<void> setFavorites(List<FavoriteDevice> entries) async {

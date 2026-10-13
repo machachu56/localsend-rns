@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:common/src/rns/rns_bridge.dart';
 import 'package:common/src/rns/rns_interface_config.dart';
 import 'package:flutter/material.dart';
+import 'package:localsend_app/provider/persistence_provider.dart';
 import 'package:localsend_app/provider/security_provider.dart';
 import 'package:logging/logging.dart';
 import 'package:refena_flutter/refena_flutter.dart';
@@ -207,6 +208,10 @@ class _RnsNetworkPageState extends State<RnsNetworkPage> {
             ),
             const SizedBox(height: 16),
           ],
+          if (_error == null) ...[
+            const _NetworkPasswordCard(),
+            const SizedBox(height: 16),
+          ],
           Text('Network Interfaces', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           if (_error != null)
@@ -285,6 +290,13 @@ class _RnsNetworkPageState extends State<RnsNetworkPage> {
   }
 }
 
+/// Mbit/s text to bit/s; null when empty or invalid. RNS needs at least 5 bit/s.
+int? _parseBitrate(String text) {
+  final mbit = double.tryParse(text.trim().replaceAll(',', '.'));
+  if (mbit == null || mbit <= 0) return null;
+  return (mbit * 1000000).round();
+}
+
 class _InterfaceEditDialog extends StatefulWidget {
   final RnsInterfaceConfig? initial;
   final void Function(RnsInterfaceConfig config) onSave;
@@ -302,6 +314,7 @@ class _InterfaceEditDialogState extends State<_InterfaceEditDialog> {
   late final TextEditingController _nameController;
   late final TextEditingController _hostController;
   late final TextEditingController _portController;
+  late final TextEditingController _bitrateController;
   late String _type;
   late bool _enabled;
 
@@ -311,6 +324,8 @@ class _InterfaceEditDialogState extends State<_InterfaceEditDialog> {
     _nameController = TextEditingController(text: widget.initial?.name ?? '');
     _hostController = TextEditingController(text: widget.initial?.targetHost ?? '');
     _portController = TextEditingController(text: widget.initial?.targetPort ?? '5421');
+    final bitrate = widget.initial?.bitrate;
+    _bitrateController = TextEditingController(text: bitrate == null ? '' : '${bitrate / 1000000}'.replaceFirst(RegExp(r'\.0$'), ''));
     _type = widget.initial?.type ?? 'TCPClientInterface';
     _enabled = widget.initial?.enabled ?? true;
   }
@@ -320,6 +335,7 @@ class _InterfaceEditDialogState extends State<_InterfaceEditDialog> {
     _nameController.dispose();
     _hostController.dispose();
     _portController.dispose();
+    _bitrateController.dispose();
     super.dispose();
   }
 
@@ -367,6 +383,17 @@ class _InterfaceEditDialogState extends State<_InterfaceEditDialog> {
               ),
             ],
             const SizedBox(height: 12),
+            TextField(
+              controller: _bitrateController,
+              decoration: const InputDecoration(
+                labelText: 'Bandwidth (Mbit/s, optional)',
+                hintText: '100',
+                helperText: 'Empty = RNS default. Higher values allow larger packets for file transfers.',
+                helperMaxLines: 2,
+              ),
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            ),
+            const SizedBox(height: 12),
             CheckboxListTile(
               title: const Text('Enabled'),
               value: _enabled,
@@ -389,12 +416,104 @@ class _InterfaceEditDialogState extends State<_InterfaceEditDialog> {
               enabled: _enabled,
               targetHost: _hostController.text.trim().isEmpty ? null : _hostController.text.trim(),
               targetPort: _portController.text.trim().isEmpty ? null : _portController.text.trim(),
+              bitrate: _parseBitrate(_bitrateController.text),
             ));
             Navigator.of(context).pop();
           },
           child: const Text('Save'),
         ),
       ],
+    );
+  }
+}
+
+
+/// Devices only see each other (and can only send files to each other) over Reticulum
+/// when they use the same password. Empty = open network.
+class _NetworkPasswordCard extends StatefulWidget {
+  const _NetworkPasswordCard();
+
+  @override
+  State<_NetworkPasswordCard> createState() => _NetworkPasswordCardState();
+}
+
+class _NetworkPasswordCardState extends State<_NetworkPasswordCard> {
+  late final TextEditingController _controller;
+  late String _saved;
+  bool _obscure = true;
+  bool _initialized = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_initialized) return;
+    _initialized = true;
+    _saved = context.ref.read(persistenceProvider).getRnsPassword();
+    _controller = TextEditingController(text: _saved);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final password = _controller.text;
+    await context.ref.read(persistenceProvider).setRnsPassword(password);
+    if (!mounted) return;
+    await context.ref.read(rnsBridgeProvider).setPassword(password);
+    if (!mounted) return;
+    setState(() => _saved = password);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(password.isEmpty ? 'Password removed: open network' : 'Password saved')),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final changed = _controller.text != _saved;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Network password', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(
+              _saved.isEmpty
+                  ? 'Open network: any device can find you and send you files.'
+                  : 'Only devices with the same password can find you or send you files.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _controller,
+              obscureText: _obscure,
+              autocorrect: false,
+              enableSuggestions: false,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                labelText: 'Password',
+                helperText: 'Leave empty for an open network. Must be identical on every device.',
+                suffixIcon: IconButton(
+                  icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
+                  onPressed: () => setState(() => _obscure = !_obscure),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton(
+                onPressed: changed ? _save : null,
+                child: const Text('Save'),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

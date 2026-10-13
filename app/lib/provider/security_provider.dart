@@ -9,6 +9,7 @@ import 'package:common/src/rns/rns_discovery_service.dart';
 import 'package:common/src/rns/rns_file_transfer.dart';
 import 'package:flutter/services.dart';
 import 'package:localsend_app/provider/device_info_provider.dart';
+import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
 import 'package:localsend_app/provider/persistence_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/util/security_helper.dart';
@@ -37,7 +38,10 @@ final rnsBridgeProvider = Provider<RnsBridge>((ref) {
   final bridge = RnsBridge();
 
   bridge.events.listen((event) {
-    if (event.type == 'ready') {
+    if (event.type == 'network_changed') {
+      // Peers of the previous network must not stay in the list.
+      ref.redux(nearbyDevicesProvider).dispatch(ClearRnsDevicesAction());
+    } else if (event.type == 'ready') {
       // Peers address us by destination hash (not identity hash), so that is what we expose.
       final hash = (event.data['destination_hash'] ?? event.data['identity_hash']) as String?;
       if (hash != null) {
@@ -54,7 +58,7 @@ final rnsBridgeProvider = Provider<RnsBridge>((ref) {
   });
 
   // Auto-start with reasonable defaults for development
-  unawaited(_startBridge(bridge));
+  unawaited(_startBridge(bridge, ref.read(persistenceProvider).getRnsPassword()));
 
   return bridge;
 });
@@ -75,7 +79,7 @@ const _rnsMethodChannel = MethodChannel('org.localsend.localsend_app/rns');
 const _rnsEventChannel = EventChannel('org.localsend.localsend_app/rns_events');
 
 /// Android has no system Python: rns_bridge.py runs in-process (Chaquopy) behind platform channels.
-Future<void> _startBridgeAndroid(RnsBridge bridge) async {
+Future<void> _startBridgeAndroid(RnsBridge bridge, String password) async {
   final supportDir = await getApplicationSupportDirectory();
   final cacheDir = await getTemporaryDirectory();
 
@@ -89,15 +93,16 @@ Future<void> _startBridgeAndroid(RnsBridge bridge) async {
     configPath: '${supportDir.path}/.reticulum',
     identityPath: '${supportDir.path}/.localsend_reticulum_identity',
     stagingDir: '${cacheDir.path}/localsend_rns_staging',
+    password: password,
   );
 }
 
 Future<void> _rnsMethodChannelStart() => _rnsMethodChannel.invokeMethod('start');
 
-Future<void> _startBridge(RnsBridge bridge) async {
+Future<void> _startBridge(RnsBridge bridge, String password) async {
   if (Platform.isAndroid) {
     try {
-      await _startBridgeAndroid(bridge);
+      await _startBridgeAndroid(bridge, password);
     } catch (e) {
       _logger.severe('Failed to start embedded RNS bridge: $e');
       bridge.reportError('Failed to start Reticulum: $e');
@@ -137,14 +142,16 @@ Future<void> _startBridge(RnsBridge bridge) async {
     return 'python3';
   }
 
-  final homeDir = Platform.environment['HOME'] ?? '/tmp';
+  // HOME does not exist on Windows.
+  final homeDir = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? Directory.systemTemp.path;
 
   await bridge.start(
     pythonPath: findPython(),
     bridgeScriptPath: findBridgeScript(),
     configPath: '$homeDir/.reticulum',
     identityPath: '$homeDir/.localsend_reticulum_identity',
-    stagingDir: '/tmp/localsend_rns_staging',
+    stagingDir: '${Directory.systemTemp.path}/localsend_rns_staging',
+    password: password,
   );
 }
 

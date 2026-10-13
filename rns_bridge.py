@@ -6,7 +6,8 @@ Communicates with the Flutter/Dart app via JSON lines over stdin/stdout.
 Everything that is not a protocol message (RNS logs, stray prints) goes to stderr.
 
 Commands (-> bridge):
-  {"cmd": "init", "config_path": "...", "identity_path": "...", "staging_dir": "..."}
+  {"cmd": "init", "config_path": "...", "identity_path": "...", "staging_dir": "...", "password": "<optional>"}
+  {"cmd": "set_password", "password": "<empty = open network>"}
   {"cmd": "announce", "app_data": {"alias": "...", "version": "...", "device_model": "..."}}
   {"cmd": "send_session", "session_id": "...", "dest_hex": "<hex>", "files": [{"id","file_name","size","type","path"}]}
   {"cmd": "accept_session", "session_id": "...", "accepted_files": {"<file id>": "<name>"}}
@@ -31,6 +32,7 @@ Network usage design:
   * Paths are only requested when a transfer is actually started.
 """
 
+import hashlib
 import json
 import os
 import random
@@ -74,10 +76,17 @@ RNS.logcall = lambda msg: sys.stderr.write(msg + "\n")
 
 APP_NAME = "localesnd-reticulum"
 TRANSFER_ASPECT = "transfer"
+# Fixed salt: every device must derive the same tag from the same password.
+PASSWORD_SALT = b"localsend-reticulum/network-password/v1"
+PASSWORD_ITERATIONS = 200_000
 
 ANNOUNCE_INTERVAL = 30 * 60        # periodic re-announce
 ANNOUNCE_MIN_GAP = 5 * 60          # minimum gap between two automatic announces
-USER_ANNOUNCE_MIN_GAP = 30         # minimum gap when the user scans or a new peer needs an answer
+# Public Reticulum hubs rate limit announces per destination and silently drop the excess, so
+# anything beyond the periodic announce (scans, answers to hello) is spaced and, if too early, deferred.
+USER_ANNOUNCE_MIN_GAP = 60
+# A scan the user triggers by hand is human-paced, so it may announce sooner than automatic answers.
+MANUAL_REFRESH_MIN_GAP = 20
 PEER_REFRESH_AFTER = 60 * 60       # an old peer re-announcing counts as "new" again
 PEER_TTL = 7 * 24 * 3600           # forget cached peers after a week
 PATH_WAIT = 25                     # seconds to wait for path/identity before a transfer fails
@@ -87,6 +96,9 @@ PROGRESS_MIN_INTERVAL = 0.25
 RNS_CONFIG_DIR = None
 STAGING_DIR = None
 PEERS_FILE = None
+IDENTITY_PATH = None
+network_tag = None       # None = open network (no password)
+announce_handler = None
 
 identity = None
 destination = None
@@ -99,6 +111,28 @@ shutting_down = threading.Event()
 active_sessions = {}
 sessions_lock = threading.Lock()
 peers = {}  # dest hex -> {"hash", "data", "last_seen"}
+
+
+# --------------------------------------------------------------------------- network password
+#
+# The password is turned into a tag that becomes part of our destination's aspect. RNS only
+# delivers announces whose aspect matches the handler's filter, so devices with another (or no)
+# password never show up in the peer list, and nobody can compute our destination hash, or
+# open a link to us, without the password. The tag itself is derived with a slow KDF.
+
+def _derive_tag(password):
+    if not password:
+        return None
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), PASSWORD_SALT, PASSWORD_ITERATIONS).hex()[:16]
+
+
+def _aspects():
+    return (APP_NAME, TRANSFER_ASPECT) + ((network_tag,) if network_tag else ())
+
+
+def _peers_file():
+    # Peers of one network are meaningless in another, so each network has its own cache.
+    return IDENTITY_PATH + ".peers" + (f".{network_tag}" if network_tag else "") + ".json"
 
 
 # --------------------------------------------------------------------------- peers
@@ -131,7 +165,8 @@ def _load_peers():
 
 
 class AnnounceHandler:
-    aspect_filter = f"{APP_NAME}.{TRANSFER_ASPECT}"
+    def __init__(self):
+        self.aspect_filter = ".".join(_aspects())
 
     def received_announce(self, destination_hash, announced_identity, app_data, *args, **kwargs):
         try:
@@ -142,13 +177,20 @@ class AnnounceHandler:
             data = json.loads(app_data.decode("utf-8")) if app_data else {}
             if not isinstance(data, dict):
                 data = {}
+            if data.get("bye"):
+                # The peer left this network (password change/shutdown): forget it right away.
+                if peers.pop(dest_hex, None) is not None:
+                    _save_peers()
+                send_event({"event": "peer_lost", "destination_hash": dest_hex})
+                return
+            hello = bool(data.pop("hello", False))
             now = time.time()
             old = peers.get(dest_hex)
             is_new = old is None or now - old["last_seen"] > PEER_REFRESH_AFTER
             peers[dest_hex] = {"hash": dest_hex, "data": data, "last_seen": now}
             _save_peers()
             send_event({"event": "peer_discovered", "destination_hash": dest_hex, "app_data": data})
-            if is_new:
+            if is_new or hello:
                 _schedule_reply_announce()
         except Exception as e:
             send_event({"event": "error", "message": f"announce parse error: {e}"})
@@ -156,7 +198,8 @@ class AnnounceHandler:
 
 # --------------------------------------------------------------------------- announces
 
-def _do_announce(force=False, min_gap=ANNOUNCE_MIN_GAP):
+def _do_announce(force=False, min_gap=ANNOUNCE_MIN_GAP, hello=False):
+    """hello=True marks startup/scan announces: every peer that hears one answers with its own."""
     global last_announce
     if destination is None or local_info is None:
         return False
@@ -165,19 +208,57 @@ def _do_announce(force=False, min_gap=ANNOUNCE_MIN_GAP):
         if not force and now - last_announce < min_gap:
             return False
         last_announce = now
-    destination.announce(app_data=json.dumps(local_info, ensure_ascii=False).encode("utf-8"))
+    info = {**local_info, "hello": True} if hello else local_info
+    destination.announce(app_data=json.dumps(info, ensure_ascii=False).encode("utf-8"))
     RNS.log(f"Announced {destination.hash.hex()}", RNS.LOG_NOTICE)
     send_event({"event": "announce_sent"})
     return True
 
 
-def _schedule_reply_announce():
-    # A new peer only learns about us from an announce, so answer it soon (still rate limited).
-    if time.time() - last_announce < USER_ANNOUNCE_MIN_GAP:
-        return
-    t = threading.Timer(random.uniform(2, 10), lambda: _do_announce(min_gap=USER_ANNOUNCE_MIN_GAP))
+_pending_hello = None   # None = nothing scheduled, else whether the scheduled announce carries hello
+
+
+def _schedule_announce(hello, min_gap=USER_ANNOUNCE_MIN_GAP):
+    """Announce soon, but never closer than min_gap to the previous one.
+    One scheduled announce serves every request made before it fires (an announce is a broadcast)."""
+    global _pending_hello
+    with announce_lock:
+        if _pending_hello is not None:
+            _pending_hello = _pending_hello or hello
+            return
+        _pending_hello = hello
+        wait = min_gap - (time.time() - last_announce)
+        # Manual refresh: announce right away when allowed; automatic answers get a little jitter.
+        delay = max(0.0 if min_gap == MANUAL_REFRESH_MIN_GAP else random.uniform(1, 4), wait)
+
+    def _fire():
+        global _pending_hello
+        with announce_lock:
+            h, _pending_hello = _pending_hello, None
+        try:
+            _do_announce(force=True, hello=bool(h))
+        except Exception as e:
+            RNS.log(f"scheduled announce failed: {e}")
+
+    t = threading.Timer(delay, _fire)
     t.daemon = True
     t.start()
+
+
+def _schedule_reply_announce():
+    """Answers a hello (or an unknown peer): the peer may have connected after our last announce."""
+    _schedule_announce(hello=False)
+
+
+def _say_goodbye():
+    """Tells peers of the current network to drop us; they would otherwise keep a dead destination."""
+    if destination is None:
+        return
+    try:
+        destination.announce(app_data=json.dumps({"bye": True}).encode("utf-8"))
+        RNS.log(f"Goodbye announced for {destination.hash.hex()}", RNS.LOG_NOTICE)
+    except Exception as e:
+        RNS.log(f"goodbye announce failed: {e}")
 
 
 def _periodic_announce_loop():
@@ -189,6 +270,18 @@ def _periodic_announce_loop():
 
 
 # --------------------------------------------------------------------------- sessions
+
+def _rss_mb():
+    """Resident memory of this process in MB (Linux/Android), for transfer diagnostics."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return -1
+
 
 class Session:
     def __init__(self, session_id, link, role):
@@ -222,8 +315,9 @@ class Session:
         self.status = "closed"
         with sessions_lock:
             active_sessions.pop(self.session_id, None)
+        reason = getattr(link, "teardown_reason", None)
+        RNS.log(f"[{self.session_id}] link closed (reason={reason}, finished={len(self.finished)}, failed={len(self.failed)}, rss={_rss_mb()}MB)", RNS.LOG_NOTICE)
         if was_open and not self.completed and not self.cancelled:
-            reason = getattr(link, "teardown_reason", None)
             if self.role == "sender" and self.status_before_close in ("connecting",):
                 self.emit("session_error", error="could not establish link to destination")
             elif self.finished or self.status_before_close in ("accepted",):
@@ -322,6 +416,14 @@ class Session:
     def _on_resource_started(self, resource):
         if self.role != "receiver":
             return
+        seg = getattr(resource, "segment_index", 1)
+        total = getattr(resource, "total_segments", 1)
+        # A large file arrives as several segments (~1 MB each); only the first one starts a file.
+        self.active_resource = resource
+        if seg % 10 == 1 or seg == total:
+            RNS.log(f"[{self.session_id}] resource segment {seg}/{total} started (rss={_rss_mb()}MB)", RNS.LOG_NOTICE)
+        if seg != 1:
+            return
         with self.lock:
             idx = self.started_count
             self.started_count += 1
@@ -333,17 +435,20 @@ class Session:
 
         def _poll():
             last = -1.0
-            while resource.status in (RNS.Resource.ADVERTISED, RNS.Resource.TRANSFERRING, RNS.Resource.QUEUED):
+            # Follows the file across all of its segments (progress covers the whole file).
+            while file_id not in self.finished and file_id not in self.failed and not self.cancelled and self.status != "closed":
                 try:
-                    p = float(resource.get_progress())
+                    p = float(self.active_resource.get_progress())
                 except Exception:
                     break
-                if p != last:
+                if p != last and p < 1.0:
                     self.emit("transfer_progress", file_id=file_id, progress=p)
                     last = p
                 time.sleep(0.5)
 
         threading.Thread(target=_poll, daemon=True).start()
+
+    active_resource = None
 
     def _on_resource_concluded(self, resource):
         metadata = resource.metadata if isinstance(resource.metadata, dict) else {}
@@ -359,6 +464,7 @@ class Session:
                     send_event({"event": "error", "message": f"control resource error: {e}"})
             return
 
+        RNS.log(f"[{self.session_id}] resource concluded status={resource.status} (COMPLETE={RNS.Resource.COMPLETE}) rss={_rss_mb()}MB", RNS.LOG_NOTICE)
         file_id = metadata.get("fileId")
         if file_id is None:
             with self.lock:
@@ -410,14 +516,21 @@ class Session:
                 fh = open(path, "rb")
                 last = [0.0]
 
-                def on_progress(r, fid=file_id, last=last):
+                logged = [0]
+
+                def on_progress(r, fid=file_id, last=last, logged=logged):
                     now = time.time()
                     if now - last[0] >= PROGRESS_MIN_INTERVAL:
                         last[0] = now
-                        self.emit("transfer_progress", file_id=fid, progress=float(r.get_progress()))
+                        prog = float(r.get_progress())
+                        self.emit("transfer_progress", file_id=fid, progress=prog)
+                        if int(prog * 10) > logged[0]:
+                            logged[0] = int(prog * 10)
+                            RNS.log(f"[{self.session_id}] sending {prog:.0%} (rss={_rss_mb()}MB)", RNS.LOG_NOTICE)
 
                 def on_done(r, res=result, ev=done):
                     res["status"] = r.status
+                    RNS.log(f"[{self.session_id}] send resource done status={r.status} (COMPLETE={RNS.Resource.COMPLETE})", RNS.LOG_NOTICE)
                     ev.set()
 
                 RNS.Resource(
@@ -475,13 +588,16 @@ def _expand(p):
     return os.path.expanduser(p) if p else p
 
 
-def cmd_init(config_path, identity_path, staging_dir=None, **_):
-    global RNS_CONFIG_DIR, STAGING_DIR, PEERS_FILE, identity, destination, reticulum
+def cmd_init(config_path, identity_path, staging_dir=None, password=None, **_):
+    global RNS_CONFIG_DIR, STAGING_DIR, PEERS_FILE, IDENTITY_PATH, identity, destination, reticulum
+    global network_tag, announce_handler
 
     RNS_CONFIG_DIR = _expand(config_path)
     identity_path = _expand(identity_path)
+    IDENTITY_PATH = identity_path
+    network_tag = _derive_tag(password)
     STAGING_DIR = _expand(staging_dir) or os.path.join(os.path.dirname(identity_path), ".localsend_rns_staging")
-    PEERS_FILE = identity_path + ".peers.json"
+    PEERS_FILE = _peers_file()
     os.makedirs(STAGING_DIR, exist_ok=True)
 
     # Never touch an existing user config; only create one if there is none.
@@ -502,9 +618,10 @@ def cmd_init(config_path, identity_path, staging_dir=None, **_):
         identity = RNS.Identity()
         identity.to_file(identity_path)
 
-    destination = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE, APP_NAME, TRANSFER_ASPECT)
+    destination = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE, *_aspects())
     destination.set_link_established_callback(on_link_established)
-    RNS.Transport.register_announce_handler(AnnounceHandler())
+    announce_handler = AnnounceHandler()
+    RNS.Transport.register_announce_handler(announce_handler)
 
     for iface in RNS.Transport.interfaces:
         RNS.log(f"Interface: {iface} online={getattr(iface, 'online', '?')}", RNS.LOG_NOTICE)
@@ -522,10 +639,51 @@ def cmd_init(config_path, identity_path, staging_dir=None, **_):
     _emit_peer_list()
 
 
+def cmd_set_password(password=None, **_):
+    """Switches to the network of [password] (empty = open network) without restarting."""
+    global network_tag, destination, announce_handler, PEERS_FILE
+    if identity is None:
+        return send_event({"event": "error", "message": "not initialized"})
+    new_tag = _derive_tag(password)
+    if new_tag == network_tag:
+        return
+
+    with sessions_lock:
+        busy = any(not s.completed and not s.cancelled for s in active_sessions.values())
+    if busy:
+        return send_event({"event": "error", "message": "Finish or cancel running transfers before changing the password"})
+
+    _say_goodbye()
+    if announce_handler is not None:
+        RNS.Transport.deregister_announce_handler(announce_handler)
+    if destination is not None:
+        RNS.Transport.deregister_destination(destination)
+
+    network_tag = new_tag
+    peers.clear()
+    PEERS_FILE = _peers_file()
+    _load_peers()
+
+    destination = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE, *_aspects())
+    destination.set_link_established_callback(on_link_established)
+    announce_handler = AnnounceHandler()
+    RNS.Transport.register_announce_handler(announce_handler)
+
+    send_event({"event": "network_changed", "protected": network_tag is not None})
+    send_event({
+        "event": "ready",
+        "identity_hash": identity.hash.hex(),
+        "destination_hash": destination.hash.hex(),
+        "identity_pub": identity.get_public_key().hex(),
+    })
+    _emit_peer_list()
+    _do_announce(force=True, hello=True)
+
+
 def _emit_peer_list():
-    send_event({"event": "peer_list", "peers": [{"hash": p["hash"], "data": p["data"], "last_seen": p["last_seen"]} for p in peers.values()]})
-    for p in list(peers.values()):
-        send_event({"event": "peer_discovered", "destination_hash": p["hash"], "app_data": p["data"]})
+    # Cached peers are NOT reported as discovered: a cached destination may be dead (the peer
+    # changed password or went offline). A peer is only shown after a live announce.
+    send_event({"event": "peer_list", "peers": []})
 
 
 def cmd_announce(app_data, **_):
@@ -537,7 +695,7 @@ def cmd_announce(app_data, **_):
     first = local_info is None
     changed = local_info != app_data
     local_info = app_data
-    _do_announce(force=first or (changed and time.time() - last_announce > 30))
+    _do_announce(force=first or (changed and time.time() - last_announce > 30), hello=first)
 
 
 def cmd_get_peers(**_):
@@ -545,9 +703,9 @@ def cmd_get_peers(**_):
 
 
 def cmd_refresh(**_):
-    """User-initiated scan: replay cached peers and announce (rate limited) so others find us."""
+    """User-initiated scan: announce with hello (rate limited); live peers answer and show up."""
     _emit_peer_list()
-    _do_announce(min_gap=USER_ANNOUNCE_MIN_GAP)
+    _schedule_announce(hello=True, min_gap=MANUAL_REFRESH_MIN_GAP)
 
 
 def cmd_request_path(dest_hex, **_):
@@ -587,7 +745,7 @@ def _connect_and_send(session_id, dest_hex, files):
     if server_identity is None:
         return _fail(session_id, "destination unreachable (no path/identity)")
 
-    out_dest = RNS.Destination(server_identity, RNS.Destination.OUT, RNS.Destination.SINGLE, APP_NAME, TRANSFER_ASPECT)
+    out_dest = RNS.Destination(server_identity, RNS.Destination.OUT, RNS.Destination.SINGLE, *_aspects())
     link = RNS.Link(out_dest)
     session = Session(session_id, link, "sender")
     session.status_before_close = "connecting"
@@ -709,6 +867,15 @@ def cmd_configure_interfaces(interfaces, **_):
                     sec[key] = str(iface[key])
             if iface.get("peers"):
                 sec["peers"] = iface["peers"]
+            # Bandwidth hint: RNS sizes the hardware MTU from it. Absent = remove the override.
+            try:
+                bitrate = int(iface.get("bitrate") or 0)
+            except (TypeError, ValueError):
+                bitrate = 0
+            if bitrate > 0:
+                sec["bitrate"] = str(bitrate)
+            elif "bitrate" in sec:
+                del sec["bitrate"]
         for name in list(section.keys()):
             if name not in wanted:
                 del section[name]
@@ -729,6 +896,7 @@ COMMANDS = {
     "request_path": cmd_request_path,
     "get_peers": cmd_get_peers,
     "refresh": cmd_refresh,
+    "set_password": cmd_set_password,
     "configure_interfaces": cmd_configure_interfaces,
     "get_interfaces": cmd_get_interfaces,
 }
@@ -744,6 +912,7 @@ def handle_line(line):
         cmd = msg.pop("cmd", None)
         msg.pop("request_id", None)
         if cmd == "shutdown":
+            _say_goodbye()
             send_event({"event": "shutdown"})
             return False
         handler = COMMANDS.get(cmd)

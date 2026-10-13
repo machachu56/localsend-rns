@@ -28,6 +28,7 @@ class NearbyDevicesService extends ReduxNotifier<NearbyDevicesState> {
   final FavoritesService _favoriteService;
   final DiscoveryLogger _discoveryLogger;
   StreamSubscription<Device>? _rnsSubscription;
+  StreamSubscription<String>? _rnsLostSubscription;
 
   NearbyDevicesService({
     required IsolateController isolateController,
@@ -51,11 +52,17 @@ class NearbyDevicesService extends ReduxNotifier<NearbyDevicesState> {
       dispatchAsync(RegisterDeviceAction(device));
       _discoveryLogger.addLog('[DISCOVER/RNS] ${device.alias} (hash: ${device.fingerprint.substring(0, 8)})');
     });
+    _rnsLostSubscription?.cancel();
+    _rnsLostSubscription = rnsService.lostStream.listen((hash) {
+      dispatch(RemoveRnsDeviceAction(hash));
+    });
   }
 
   void stopRnsListener() {
     _rnsSubscription?.cancel();
     _rnsSubscription = null;
+    _rnsLostSubscription?.cancel();
+    _rnsLostSubscription = null;
   }
 
   @override
@@ -85,6 +92,28 @@ class ClearFoundDevicesAction extends ReduxAction<NearbyDevicesService, NearbyDe
     return state.copyWith(
       devices: {},
     );
+  }
+}
+
+/// Removes all Reticulum devices (e.g. after the network password changed), keeps LAN devices.
+class ClearRnsDevicesAction extends ReduxAction<NearbyDevicesService, NearbyDevicesState> {
+  @override
+  NearbyDevicesState reduce() {
+    return state.copyWith(
+      devices: Map.fromEntries(state.devices.entries.where((e) => e.value.destinationHash == null)),
+    );
+  }
+}
+
+/// Removes one Reticulum device, e.g. because it left the network.
+class RemoveRnsDeviceAction extends ReduxAction<NearbyDevicesService, NearbyDevicesState> {
+  final String destinationHash;
+
+  RemoveRnsDeviceAction(this.destinationHash);
+
+  @override
+  NearbyDevicesState reduce() {
+    return state.copyWith(devices: {...state.devices}..remove(destinationHash));
   }
 }
 

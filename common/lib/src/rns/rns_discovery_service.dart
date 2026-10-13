@@ -36,12 +36,16 @@ class RnsDiscoveredPeer {
 class RnsAnnounceService {
   final RnsBridge _bridge;
   final StreamController<Device> _deviceController = StreamController<Device>.broadcast();
+  final StreamController<String> _lostController = StreamController<String>.broadcast();
   StreamSubscription<RnsBridgeEvent>? _subscription;
   bool _listening = false;
 
   RnsAnnounceService(this._bridge);
 
   Stream<Device> get deviceStream => _deviceController.stream;
+
+  /// Destination hashes of peers that left the network (password change, shutdown).
+  Stream<String> get lostStream => _lostController.stream;
   bool get isListening => _listening;
 
   void startListening() {
@@ -49,7 +53,13 @@ class RnsAnnounceService {
     _listening = true;
 
     _subscription = _bridge.events.listen((event) {
-      if (event.type == 'peer_discovered') {
+      if (event.type == 'peer_lost') {
+        final hash = event.data['destination_hash'] as String?;
+        if (hash != null) {
+          _lostController.add(hash);
+          _logger.info('Peer left: ${hash.substring(0, 8)}');
+        }
+      } else if (event.type == 'peer_discovered') {
         try {
           final peer = RnsDiscoveredPeer(
             destinationHash: event.data['destination_hash'] as String,
@@ -81,5 +91,6 @@ class RnsAnnounceService {
   void dispose() {
     stopListening();
     _deviceController.close();
+    _lostController.close();
   }
 }

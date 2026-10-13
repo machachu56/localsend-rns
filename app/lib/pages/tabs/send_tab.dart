@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'package:collection/collection.dart';
 import 'package:common/model/device.dart';
@@ -390,6 +392,8 @@ class _ScanButton extends StatelessWidget {
       tooltip: t.sendTab.scan,
       onSelected: (ip) async {
         context.redux(nearbyDevicesProvider).dispatch(ClearFoundDevicesAction());
+        // The IP picker only concerns LAN scanning; Reticulum peers are refreshed regardless.
+        unawaited(context.ref.read(rnsBridgeProvider).refresh());
         await context.global.dispatchAsync(StartLegacySubnetScan(subnets: [ip]));
       },
       itemBuilder: (_) {

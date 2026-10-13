@@ -542,6 +542,20 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
             },
           ),
         );
+        if (!session.background) {
+          // Same as the HTTP flow: once the receiver accepted, show the files with their progress.
+          final multi = ref.read(settingsProvider).sendMode == SendMode.multiple;
+          // ignore: use_build_context_synchronously, unawaited_futures
+          Routerino.context.pushAndRemoveUntil(
+            removeUntil: HomePage,
+            transition: RouterinoTransition.fade(),
+            builder: () => ProgressPage(
+              showAppBar: multi,
+              closeSessionOnClose: !multi,
+              sessionId: sessionId,
+            ),
+          );
+        }
         break;
       case 'transfer_progress':
         final fileId = event.data['file_id'] as String?;

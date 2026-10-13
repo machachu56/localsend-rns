@@ -7,6 +7,9 @@ class RnsInterfaceConfig {
   final String? listenPort;
   final List<String>? peers;
 
+  /// Interface bandwidth in bit/s. RNS derives packet/MTU sizes from it; null = RNS default.
+  final int? bitrate;
+
   const RnsInterfaceConfig({
     required this.name,
     this.type = 'TCPClientInterface',
@@ -15,6 +18,7 @@ class RnsInterfaceConfig {
     this.targetPort,
     this.listenPort,
     this.peers,
+    this.bitrate,
   });
 
   Map<String, dynamic> toJson() => {
@@ -25,6 +29,7 @@ class RnsInterfaceConfig {
         if (targetPort != null) 'target_port': targetPort,
         if (listenPort != null) 'listen_port': listenPort,
         if (peers != null) 'peers': peers,
+        if (bitrate != null) 'bitrate': bitrate,
       };
 
   factory RnsInterfaceConfig.fromJson(Map<String, dynamic> json) {
@@ -36,6 +41,7 @@ class RnsInterfaceConfig {
       targetPort: json['target_port'] as String?,
       listenPort: json['listen_port'] as String?,
       peers: json['peers'] != null ? List<String>.from(json['peers'] as List) : null,
+      bitrate: int.tryParse('${json['bitrate'] ?? ''}'),
     );
   }
 
@@ -47,6 +53,7 @@ class RnsInterfaceConfig {
     String? targetPort,
     String? listenPort,
     List<String>? peers,
+    int? bitrate,
   }) {
     return RnsInterfaceConfig(
       name: name ?? this.name,
@@ -56,6 +63,7 @@ class RnsInterfaceConfig {
       targetPort: targetPort ?? this.targetPort,
       listenPort: listenPort ?? this.listenPort,
       peers: peers ?? this.peers,
+      bitrate: bitrate ?? this.bitrate,
     );
   }
 }
