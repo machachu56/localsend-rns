@@ -1,3 +1,7 @@
+/// @deprecated Use RnsAnnounceService instead.
+/// Kept for backward compatibility with original LocalSend clients.
+/// Remove when RNS-only mode is the default.
+
 import 'package:common/model/device.dart';
 import 'package:common/src/task/discovery/http_target_discovery.dart';
 import 'package:common/util/task_runner.dart';

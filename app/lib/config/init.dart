@@ -24,6 +24,7 @@ import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
 import 'package:localsend_app/provider/network/server/server_provider.dart';
 import 'package:localsend_app/provider/network/webrtc/signaling_provider.dart';
 import 'package:localsend_app/provider/persistence_provider.dart';
+import 'package:localsend_app/provider/security_provider.dart';
 
 // [FOSS_REMOVE_START]
 import 'package:localsend_app/provider/purchase_provider.dart';
@@ -223,6 +224,21 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
     ref.redux(nearbyDevicesProvider).dispatchAsync(StartMulticastListener()); // ignore: unawaited_futures
   } catch (e) {
     _logger.warning('Starting multicast listener failed', e);
+  }
+
+  // Wire up RNS services
+  try {
+    final rnsAnnounce = ref.read(rnsAnnounceServiceProvider);
+    final rnsTransfer = ref.read(rnsFileTransferServiceProvider);
+    final rnsBridge = ref.read(rnsBridgeProvider);
+
+    rnsAnnounce.startListening();
+    rnsTransfer.startListening();
+
+    ref.redux(nearbyDevicesProvider).notifier.startRnsListener(rnsAnnounce);
+    ref.notifier(serverProvider).attachRns(rnsAnnounce, rnsTransfer, rnsBridge);
+  } catch (e) {
+    _logger.warning('Wiring RNS services failed', e);
   }
 
   ref.redux(signalingProvider).dispatch(SetupSignalingConnection());

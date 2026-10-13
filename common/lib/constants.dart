@@ -30,3 +30,10 @@ const defaultDiscoveryTimeout = 500;
 /// because on some Android devices this is the only IP range
 /// that can receive UDP multicast messages.
 const defaultMulticastGroup = '224.0.0.167';
+
+/// RNS-specific constants
+const rnsAppName = 'localesnd-reticulum';
+const rnsTransferAspect = 'transfer';
+const rnsDefaultConfigPath = '~/.reticulum';
+const rnsDefaultIdentityPath = '~/.localsend_reticulum_identity';
+const rnsBridgeScriptName = 'rns_bridge.py';

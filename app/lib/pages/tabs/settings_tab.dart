@@ -13,7 +13,9 @@ import 'package:localsend_app/pages/changelog_page.dart';
 import 'package:localsend_app/pages/donation/donation_page.dart';
 import 'package:localsend_app/pages/language_page.dart';
 import 'package:localsend_app/pages/settings/network_interfaces_page.dart';
+import 'package:localsend_app/pages/settings/rns_network_page.dart';
 import 'package:localsend_app/pages/tabs/settings_tab_controller.dart';
+import 'package:localsend_app/provider/security_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/provider/version_provider.dart';
 import 'package:localsend_app/util/alias_generator.dart';
@@ -488,6 +490,34 @@ class SettingsTab extends StatelessWidget {
                       ),
                     ],
                   ),
+                  if (vm.advanced)
+                    _SettingsSection(
+                      title: 'Reticulum Network',
+                      children: [
+                        _SettingsEntry(
+                          label: 'RNS Identity',
+                          child: Consumer(
+                            builder: (context, ref) {
+                              final hash = ref.watch(rnsIdentityHashProvider);
+                              return TextButton(
+                                style: TextButton.styleFrom(
+                                  backgroundColor: Theme.of(context).inputDecorationTheme.fillColor,
+                                  shape: RoundedRectangleBorder(borderRadius: Theme.of(context).inputDecorationTheme.borderRadius),
+                                  foregroundColor: Theme.of(context).colorScheme.onSurface,
+                                ),
+                                onPressed: () async {
+                                  await context.push(() => const RnsNetworkPage());
+                                },
+                                child: Text(
+                                  hash != null ? '${hash.substring(0, 12)}...' : 'Not configured',
+                                  style: Theme.of(context).textTheme.titleMedium,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
                   _SettingsSection(
                     title: t.settingsTab.other.title,
                     padding: const EdgeInsets.only(bottom: 0),

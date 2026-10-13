@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:localsend_app/config/theme.dart';
 import 'package:localsend_app/gen/strings.g.dart';
 import 'package:localsend_app/model/send_mode.dart';
+import 'package:localsend_app/pages/qr_pair_page.dart';
 import 'package:localsend_app/pages/selected_files_page.dart';
 import 'package:localsend_app/pages/tabs/send_tab_vm.dart';
 import 'package:localsend_app/pages/troubleshoot_page.dart';
@@ -14,6 +15,7 @@ import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
 import 'package:localsend_app/provider/network/scan_facade.dart';
 import 'package:localsend_app/provider/network/send_provider.dart';
 import 'package:localsend_app/provider/progress_provider.dart';
+import 'package:localsend_app/provider/security_provider.dart';
 import 'package:localsend_app/provider/selection/selected_sending_files_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/util/favorites.dart';
@@ -190,10 +192,37 @@ class SendTab extends StatelessWidget {
                       ),
                     ),
                     Tooltip(
+                      message: 'RNS Address',
+                      child: CustomIconButton(
+                        onPressed: () async => vm.onTapRnsAddress(context),
+                        child: const Icon(Icons.share),
+                      ),
+                    ),
+                    Tooltip(
                       message: t.dialogs.favoriteDialog.title,
                       child: CustomIconButton(
                         onPressed: () async => await vm.onTapFavorite(context),
                         child: const Icon(Icons.favorite),
+                      ),
+                    ),
+                    Tooltip(
+                      message: 'Show QR',
+                      child: CustomIconButton(
+                        onPressed: () async {
+                          // Touch the bridge provider to start it
+                          ref.read(rnsBridgeProvider);
+                          // Wait a moment for the bridge to start
+                          await Future.delayed(const Duration(milliseconds: 500));
+                          final hash = ref.read(rnsIdentityHashProvider);
+                          final alias = ref.read(settingsProvider).alias;
+                          if (hash != null && context.mounted) {
+                            context.push(() => ShowQrPage(
+                              destinationHash: hash,
+                              alias: alias,
+                            ));
+                          }
+                        },
+                        child: const Icon(Icons.qr_code),
                       ),
                     ),
                     _SendModeButton(
@@ -214,7 +243,7 @@ class SendTab extends StatelessWidget {
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 10, left: _horizontalPadding, right: _horizontalPadding),
                     child: Hero(
-                      tag: 'device-${device.ip}',
+                      tag: 'device-${device.ip ?? device.destinationHash}',
                       child: vm.sendMode == SendMode.multiple
                           ? _MultiSendDeviceListTile(
                               device: device,
@@ -226,7 +255,7 @@ class SendTab extends StatelessWidget {
                               device: device,
                               isFavorite: favoriteEntry != null,
                               nameOverride: favoriteEntry?.alias,
-                              onFavoriteTap: () async => await vm.onToggleFavorite(context, device),
+                              onFavoriteTap: device.ip == null ? null : () async => await vm.onToggleFavorite(context, device),
                               onTap: () async => await vm.onTapDevice(context, device),
                             ),
                     ),

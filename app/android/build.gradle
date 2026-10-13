@@ -1,3 +1,15 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // Python runtime for the Reticulum bridge. 16.x is the last line that ships armeabi-v7a.
+        classpath "com.android.tools.build:gradle:8.9.1"
+        classpath "com.chaquo.python:gradle:16.1.0"
+    }
+}
+
 allprojects {
     repositories {
         google()
@@ -17,7 +29,7 @@ subprojects {
         if (project.plugins.hasPlugin("com.android.application") ||
                 project.plugins.hasPlugin("com.android.library")) {
             project.android {
-                compileSdkVersion 34
+                compileSdkVersion 36
                 buildToolsVersion "34.0.0"
             }
         }

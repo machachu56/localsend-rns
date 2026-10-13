@@ -58,6 +58,12 @@ class DeviceListTile extends StatelessWidget {
                 foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
                 label: 'LAN • HTTP',
               )
+            else if (device.destinationHash != null)
+              DeviceBadge(
+                backgroundColor: badgeColor,
+                foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                label: 'RNS',
+              )
             else
               DeviceBadge(
                 backgroundColor: badgeColor,

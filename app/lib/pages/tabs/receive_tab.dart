@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:localsend_app/gen/strings.g.dart';
 import 'package:localsend_app/pages/home_page.dart';
 import 'package:localsend_app/pages/home_page_controller.dart';
+import 'package:localsend_app/pages/qr_pair_page.dart';
 import 'package:localsend_app/pages/receive_history_page.dart';
 import 'package:localsend_app/pages/tabs/receive_tab_vm.dart';
 import 'package:localsend_app/provider/animation_provider.dart';
@@ -179,6 +180,12 @@ class _CornerButtons extends StatelessWidget {
                   child: const Icon(Icons.history),
                 ),
               ),
+            CustomIconButton(
+              onPressed: () async {
+                await context.push(() => const ScanQrPage());
+              },
+              child: const Icon(Icons.qr_code_scanner),
+            ),
             CustomIconButton(
               key: const ValueKey('info-btn'),
               onPressed: toggleAdvanced,

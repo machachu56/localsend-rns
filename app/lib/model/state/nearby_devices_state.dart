@@ -43,6 +43,7 @@ extension on Device {
     return Device(
       signalingId: signalingId ?? other.signalingId,
       ip: ip ?? other.ip,
+      destinationHash: destinationHash ?? other.destinationHash,
       version: version,
       port: port,
       https: https,

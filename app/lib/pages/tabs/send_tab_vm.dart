@@ -21,8 +21,11 @@ import 'package:localsend_app/widget/dialogs/favorite_delete_dialog.dart';
 import 'package:localsend_app/widget/dialogs/favorite_dialog.dart';
 import 'package:localsend_app/widget/dialogs/favorite_edit_dialog.dart';
 import 'package:localsend_app/widget/dialogs/no_files_dialog.dart';
+import 'package:logging/logging.dart';
 import 'package:refena_flutter/refena_flutter.dart';
 import 'package:routerino/routerino.dart';
+
+final _logger = Logger('SendTabVm');
 
 class SendTabVm {
   final SendMode sendMode;
@@ -31,6 +34,7 @@ class SendTabVm {
   final Iterable<Device> nearbyDevices;
   final List<FavoriteDevice> favoriteDevices;
   final Future<void> Function(BuildContext context) onTapAddress;
+  final Future<void> Function(BuildContext context) onTapRnsAddress;
   final Future<void> Function(BuildContext context) onTapFavorite;
   final Future<void> Function(BuildContext context, SendMode mode) onTapSendMode;
   final Future<void> Function(BuildContext context, Device device) onToggleFavorite;
@@ -44,6 +48,7 @@ class SendTabVm {
     required this.nearbyDevices,
     required this.favoriteDevices,
     required this.onTapAddress,
+    required this.onTapRnsAddress,
     required this.onTapFavorite,
     required this.onTapSendMode,
     required this.onToggleFavorite,
@@ -79,6 +84,40 @@ final sendTabVmProvider = ViewProvider((ref) {
         await ref
             .notifier(sendProvider)
             .startSession(
+              target: device,
+              files: files,
+              background: false,
+            );
+      }
+    },
+    onTapRnsAddress: (context) async {
+      final files = ref.read(selectedSendingFilesProvider);
+      if (files.isEmpty) {
+        await context.pushBottomSheet(() => const NoFilesDialog());
+        return;
+      }
+      final destHash = await showDialog<String?>(
+        context: context,
+        builder: (_) => _RnsAddressInputDialog(),
+      );
+      if (destHash != null && destHash.isNotEmpty && context.mounted) {
+        final device = Device(
+          signalingId: null,
+          ip: null,
+          destinationHash: destHash,
+          version: '',
+          port: 0,
+          https: false,
+          fingerprint: destHash,
+          alias: 'RNS: ${destHash.length > 8 ? '${destHash.substring(0, 8)}...' : destHash}',
+          deviceModel: null,
+          deviceType: DeviceType.desktop,
+          download: false,
+          discoveryMethods: {},
+        );
+        await ref
+            .notifier(sendProvider)
+            .startRnsSession(
               target: device,
               files: files,
               background: false,
@@ -145,16 +184,29 @@ final sendTabVmProvider = ViewProvider((ref) {
         return;
       }
 
-      await ref
-          .notifier(sendProvider)
-          .startSession(
-            target: device,
-            files: selectedFiles,
-            background: false,
-          );
+      final methods = device.transmissionMethods;
+      if (methods.contains(TransmissionMethod.rns) && !methods.contains(TransmissionMethod.http)) {
+        _logger.info('Sending via RNS to ${device.alias}');
+        await ref
+            .notifier(sendProvider)
+            .startRnsSession(
+              target: device,
+              files: selectedFiles,
+              background: false,
+            );
+      } else {
+        await ref
+            .notifier(sendProvider)
+            .startSession(
+              target: device,
+              files: selectedFiles,
+              background: false,
+            );
+      }
     },
     onTapDeviceMultiSend: (context, device) async {
-      final session = ref.read(sendProvider).values.firstWhereOrNull((s) => s.target.ip == device.ip);
+      final sessionKey = device.ip ?? device.destinationHash ?? '';
+      final session = ref.read(sendProvider).values.firstWhereOrNull((s) => (s.target.ip ?? s.target.destinationHash) == sessionKey);
       if (session != null) {
         if (session.status == SessionStatus.waiting) {
           ref.notifier(sendProvider).setBackground(session.sessionId, false);
@@ -183,16 +235,73 @@ final sendTabVmProvider = ViewProvider((ref) {
         ref.notifier(sendProvider).closeSession(session.sessionId);
       }
 
-      await ref
-          .notifier(sendProvider)
-          .startSession(
-            target: device,
-            files: files,
-            background: true,
-          );
+      final methods = device.transmissionMethods;
+      if (methods.contains(TransmissionMethod.rns) && !methods.contains(TransmissionMethod.http)) {
+        _logger.info('Sending via RNS to ${device.alias}');
+        await ref
+            .notifier(sendProvider)
+            .startRnsSession(
+              target: device,
+              files: files,
+              background: true,
+            );
+      } else {
+        await ref
+            .notifier(sendProvider)
+            .startSession(
+              target: device,
+              files: files,
+              background: true,
+            );
+      }
     },
   );
 });
+
+class _RnsAddressInputDialog extends StatefulWidget {
+  @override
+  State<_RnsAddressInputDialog> createState() => _RnsAddressInputDialogState();
+}
+
+class _RnsAddressInputDialogState extends State<_RnsAddressInputDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Reticulum Address'),
+      content: TextField(
+        controller: _controller,
+        decoration: const InputDecoration(
+          labelText: 'Destination Hash',
+          hintText: 'Paste the RNS destination hash',
+        ),
+        maxLines: 3,
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: () {
+            final input = _controller.text.trim();
+            if (input.isNotEmpty) {
+              Navigator.of(context).pop(input);
+            }
+          },
+          child: const Text('Send'),
+        ),
+      ],
+    );
+  }
+}
 
 class SendTabInitAction extends AsyncGlobalAction {
   final BuildContext context;

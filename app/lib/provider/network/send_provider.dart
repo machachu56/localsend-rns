@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:common/isolate.dart';
 import 'package:common/model/device.dart';
@@ -8,7 +9,9 @@ import 'package:common/model/dto/file_dto.dart';
 import 'package:common/model/file_status.dart';
 import 'package:common/model/file_type.dart';
 import 'package:common/model/session_status.dart';
+import 'package:common/src/rns/rns_bridge.dart';
 import 'package:common/util/sleep.dart';
+import 'package:localsend_app/provider/security_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:localsend_app/model/cross_file.dart';
 import 'package:localsend_app/model/send_mode.dart';
@@ -504,23 +507,218 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
     return true;
   }
 
+  StreamSubscription<RnsBridgeEvent>? _rnsSub;
+
+  void _ensureRnsListener() {
+    _rnsSub ??= ref.read(rnsBridgeProvider).events.listen(_handleRnsEvent);
+  }
+
+  /// Applies bridge events of sender-side RNS sessions to the session state.
+  void _handleRnsEvent(RnsBridgeEvent event) {
+    if (event.data['role'] != 'sender') {
+      return;
+    }
+    final sessionId = event.data['session_id'] as String?;
+    final session = sessionId == null ? null : state[sessionId];
+    if (sessionId == null || session == null) {
+      return;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final active = session.status == SessionStatus.waiting || session.status == SessionStatus.sending;
+
+    switch (event.type) {
+      case 'session_accepted':
+        final accepted = (event.data['accepted_files'] as Map?)?.keys.cast<String>().toSet() ?? <String>{};
+        state = state.updateSession(
+          sessionId: sessionId,
+          state: (s) => s?.copyWith(
+            status: SessionStatus.sending,
+            startTime: now,
+            files: {
+              for (final entry in s.files.entries)
+                entry.key: entry.value.status == FileStatus.failed
+                    ? entry.value
+                    : entry.value.copyWith(status: accepted.contains(entry.key) ? FileStatus.sending : FileStatus.skipped),
+            },
+          ),
+        );
+        break;
+      case 'transfer_progress':
+        final fileId = event.data['file_id'] as String?;
+        if (fileId != null) {
+          ref
+              .notifier(progressProvider)
+              .setProgress(
+                sessionId: sessionId,
+                fileId: fileId,
+                progress: (event.data['progress'] as num?)?.toDouble() ?? 0,
+              );
+        }
+        break;
+      case 'transfer_complete':
+      case 'transfer_failed':
+        final fileId = event.data['file_id'] as String?;
+        if (fileId != null) {
+          final failed = event.type == 'transfer_failed';
+          state = state.updateSession(
+            sessionId: sessionId,
+            state: (s) => s?.withFileStatus(fileId, failed ? FileStatus.failed : FileStatus.finished, failed ? event.data['error'] as String? : null),
+          );
+        }
+        break;
+      case 'session_complete':
+        _finish(sessionId: sessionId);
+        break;
+      case 'session_declined':
+        state = state.updateSession(
+          sessionId: sessionId,
+          state: (s) => s?.copyWith(status: SessionStatus.declined, endTime: now),
+        );
+        break;
+      case 'session_cancelled':
+        cancelSessionByReceiver(sessionId);
+        break;
+      case 'session_error':
+        if (active) {
+          state = state.updateSession(
+            sessionId: sessionId,
+            state: (s) => s?.copyWith(
+              status: SessionStatus.finishedWithErrors,
+              errorMessage: event.data['error'] as String?,
+              endTime: now,
+            ),
+          );
+        }
+        break;
+      case 'link_closed':
+        if (session.status == SessionStatus.waiting) {
+          state = state.updateSession(
+            sessionId: sessionId,
+            state: (s) => s?.copyWith(
+              status: SessionStatus.finishedWithErrors,
+              errorMessage: s.errorMessage ?? 'Connection closed',
+              endTime: now,
+            ),
+          );
+        }
+        break;
+    }
+  }
+
+  /// Sends files to a Reticulum destination.
+  /// The receiver has to accept first; the bridge then transfers the accepted files.
+  Future<void> startRnsSession({
+    required Device target,
+    required List<CrossFile> files,
+    required bool background,
+  }) async {
+    final destHash = target.destinationHash;
+    if (destHash == null || destHash.isEmpty) {
+      return;
+    }
+
+    _ensureRnsListener();
+    final rnsTransfer = ref.read(rnsFileTransferServiceProvider);
+
+    final sessionId = _uuid.v4();
+    final wireFiles = <Map<String, dynamic>>[];
+    final sendingFileEntries = <String, SendingFile>{};
+
+    for (final file in files) {
+      final id = _uuid.v4();
+      String? path = file.path;
+      String? error;
+      if (path == null && file.bytes != null) {
+        // the bridge reads from disk, so memory-only files go through a temp file
+        final tmp = File('${Directory.systemTemp.path}/localsend_rns_${id}_${file.name.replaceAll(RegExp(r'[\\/]'), '_')}');
+        await tmp.writeAsBytes(file.bytes!);
+        path = tmp.path;
+      }
+      if (path == null) {
+        error = 'File is not readable from disk';
+      }
+      if (path != null) {
+        wireFiles.add({
+          'id': id,
+          'file_name': file.name,
+          'size': file.size,
+          'type': file.fileType.name,
+          'path': path,
+        });
+      }
+      sendingFileEntries[id] = SendingFile(
+        file: FileDto(
+          id: id,
+          fileName: file.name,
+          size: file.size,
+          fileType: file.fileType,
+          hash: null,
+          preview: null,
+          metadata: null,
+        ),
+        status: error == null ? FileStatus.queue : FileStatus.failed,
+        token: null,
+        thumbnail: file.thumbnail,
+        asset: file.asset,
+        path: file.path,
+        bytes: file.bytes,
+        errorMessage: error,
+      );
+    }
+
+    state = state.updateSession(
+      sessionId: sessionId,
+      state: (_) => SendSessionState(
+        sessionId: sessionId,
+        remoteSessionId: null,
+        background: background,
+        status: SessionStatus.waiting,
+        target: target,
+        files: sendingFileEntries,
+        startTime: null,
+        endTime: null,
+        sendingTasks: [],
+        errorMessage: null,
+      ),
+    );
+
+    // Send before opening the page, so events can't arrive for an unknown session.
+    await rnsTransfer.sendSession(sessionId, destHash, wireFiles);
+
+    if (!background) {
+      await Routerino.context.push(
+        () => SendPage(showAppBar: false, closeSessionOnClose: true, sessionId: sessionId),
+        transition: RouterinoTransition.fade(),
+      );
+    }
+  }
+
   /// Closes the send-session and sends a cancel event to the receiver.
   void cancelSession(String sessionId) {
     final sessionState = state[sessionId];
     if (sessionState == null) {
       return;
     }
-    final remoteSessionId = sessionState.remoteSessionId;
 
     _cancelRunningRequests(sessionState);
 
+    final target = sessionState.target;
+    final destHash = target.destinationHash;
+
+    if (target.ip == null && destHash != null && destHash.isNotEmpty) {
+      // Cancel via RNS (the bridge knows the session by our session id)
+      unawaited(ref.read(rnsFileTransferServiceProvider).cancelSession(sessionId));
+      closeSession(sessionId);
+      return;
+    }
+
+    final remoteSessionId = sessionState.remoteSessionId;
     if (remoteSessionId == null) {
       closeSession(sessionId);
       return;
     }
 
-    // notify the receiver
-    final target = sessionState.target;
+    // notify the receiver via HTTP
     try {
       ref
           .read(httpProvider)

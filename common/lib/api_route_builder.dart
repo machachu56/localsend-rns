@@ -1,8 +1,11 @@
+/// @deprecated Use RNS Link/Resource transfer instead.
+/// Kept for backward compatibility with original LocalSend clients.
+
 import 'package:common/model/device.dart';
 
 const _basePath = '/api/localsend';
 
-/// Type-safe API paths
+/// Type-safe API paths (legacy)
 enum ApiRoute {
   info('info'),
   register('register'),

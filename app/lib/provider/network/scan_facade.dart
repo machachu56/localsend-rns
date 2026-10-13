@@ -6,8 +6,12 @@ import 'package:localsend_app/pages/home_page_controller.dart';
 import 'package:localsend_app/provider/favorites_provider.dart';
 import 'package:localsend_app/provider/local_ip_provider.dart';
 import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
+import 'package:localsend_app/provider/security_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
+import 'package:logging/logging.dart';
 import 'package:refena_flutter/refena_flutter.dart';
+
+final _logger = Logger('ScanFacade');
 
 /// Scans the network via multicast first,
 /// if no devices has been found, try http-based discovery on the first subnet.
@@ -26,6 +30,14 @@ class StartSmartScan extends AsyncGlobalAction {
   Future<void> reduce() async {
     // Try performant Multicast/UDP method first
     ref.redux(nearbyDevicesProvider).dispatch(StartMulticastScan());
+
+    // RNS: peers only learn about each other through announces, so a scan replays cached peers and
+    // asks the bridge to announce. The bridge rate limits this, so repeated scans stay cheap.
+    try {
+      unawaited(ref.read(rnsBridgeProvider).refresh());
+    } catch (e) {
+      _logger.warning('Failed to load RNS peers: $e');
+    }
 
     // At the same time, try to discover favorites
     final favorites = ref.read(favoritesProvider);

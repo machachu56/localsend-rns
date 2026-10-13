@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:collection/collection.dart';
 import 'package:common/isolate.dart';
 import 'package:common/model/device.dart';
+import 'package:common/src/rns/rns_discovery_service.dart';
 import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/model/state/nearby_devices_state.dart';
 import 'package:localsend_app/provider/favorites_provider.dart';
@@ -26,6 +27,7 @@ class NearbyDevicesService extends ReduxNotifier<NearbyDevicesState> {
   final IsolateController _isolateController;
   final FavoritesService _favoriteService;
   final DiscoveryLogger _discoveryLogger;
+  StreamSubscription<Device>? _rnsSubscription;
 
   NearbyDevicesService({
     required IsolateController isolateController,
@@ -42,6 +44,25 @@ class NearbyDevicesService extends ReduxNotifier<NearbyDevicesState> {
     devices: {},
     signalingDevices: {},
   );
+
+  void startRnsListener(RnsAnnounceService rnsService) {
+    _rnsSubscription?.cancel();
+    _rnsSubscription = rnsService.deviceStream.listen((device) {
+      dispatchAsync(RegisterDeviceAction(device));
+      _discoveryLogger.addLog('[DISCOVER/RNS] ${device.alias} (hash: ${device.fingerprint.substring(0, 8)})');
+    });
+  }
+
+  void stopRnsListener() {
+    _rnsSubscription?.cancel();
+    _rnsSubscription = null;
+  }
+
+  @override
+  void dispose() {
+    stopRnsListener();
+    super.dispose();
+  }
 }
 
 /// Binds the UDP port and listens for incoming announcements.
@@ -68,7 +89,7 @@ class ClearFoundDevicesAction extends ReduxAction<NearbyDevicesService, NearbyDe
 }
 
 /// Registers a device in the state.
-/// It will override any existing device with the same IP.
+/// It will override any existing device with the same IP or destination hash.
 class RegisterDeviceAction extends AsyncReduxAction<NearbyDevicesService, NearbyDevicesState> {
   final Device device;
 
@@ -79,17 +100,19 @@ class RegisterDeviceAction extends AsyncReduxAction<NearbyDevicesService, Nearby
 
   @override
   Future<NearbyDevicesState> reduce() async {
-    assert(device.ip?.isNotEmpty ?? false, 'IP must not be empty');
+    final key = device.ip ?? device.destinationHash;
+    if (key == null || key.isEmpty) {
+      return state;
+    }
 
     final favoriteDevice = notifier._favoriteService.state.firstWhereOrNull((e) => e.fingerprint == device.fingerprint);
     if (favoriteDevice != null && !favoriteDevice.customAlias) {
-      // Update existing favorite with new alias
       await external(notifier._favoriteService).dispatchAsync(UpdateFavoriteAction(favoriteDevice.copyWith(alias: device.alias)));
     } else {
       await Future.microtask(() {});
     }
     return state.copyWith(
-      devices: {...state.devices}..update(device.ip!, (_) => device, ifAbsent: () => device),
+      devices: {...state.devices}..update(key, (_) => device, ifAbsent: () => device),
     );
   }
 }

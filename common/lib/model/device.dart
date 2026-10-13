@@ -37,7 +37,8 @@ class SignalingDiscovery extends DiscoveryMethod with SignalingDiscoveryMappable
 
 enum TransmissionMethod {
   http('HTTP'),
-  webrtc('WebRTC');
+  webrtc('WebRTC'),
+  rns('RNS');
 
   final String label;
 
@@ -54,6 +55,10 @@ class Device with DeviceMappable {
   /// The IP address of the device.
   /// Is null when found via signaling.
   final String? ip;
+
+  /// The RNS destination hash (hex string).
+  /// Is null when not discovered via RNS.
+  final String? destinationHash;
 
   final String version;
   final int port;
@@ -84,6 +89,9 @@ class Device with DeviceMappable {
     if (webrtc) {
       methods.add(TransmissionMethod.webrtc);
     }
+    if (destinationHash != null && destinationHash!.isNotEmpty) {
+      methods.add(TransmissionMethod.rns);
+    }
 
     return methods;
   }
@@ -91,6 +99,7 @@ class Device with DeviceMappable {
   const Device({
     required this.signalingId,
     required this.ip,
+    this.destinationHash,
     required this.version,
     required this.port,
     required this.https,

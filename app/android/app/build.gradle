@@ -4,6 +4,8 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
+apply plugin: "com.chaquo.python"
+
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file('local.properties')
 if (localPropertiesFile.exists()) {
@@ -24,7 +26,7 @@ if (flutterVersionName == null) {
 
 android {
     namespace "org.localsend.localsend_app"
-    compileSdkVersion 34
+    compileSdkVersion 36
     ndkVersion flutter.ndkVersion
 
     compileOptions {
@@ -47,6 +49,14 @@ android {
         // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-build-configuration.
         minSdkVersion flutter.minSdkVersion
         targetSdkVersion 34
+
+        // Python runtime for the Reticulum bridge (rns_bridge.py runs in-process on Android).
+        python {
+            version "3.11"
+            pip {
+                install "rns"
+            }
+        }
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
     }
@@ -72,6 +82,8 @@ android {
         }
         debug {
             applicationIdSuffix ".debug"
+            // Chaquopy needs ndk.abiFilters, which Flutter sets from --target-platform.
+            // Don't use --split-per-abi: it conflicts with abiFilters. Build one APK per --target-platform instead.
         }
     }
 
@@ -87,6 +99,16 @@ android {
 flutter {
     source '../..'
 }
+
+// rns_bridge.py lives in the repo root (the desktop app runs it as a child process);
+// Chaquopy bundles a copy of it into the APK.
+def rnsPythonDir = layout.buildDirectory.dir("generated/rns_python")
+tasks.register("copyRnsBridge", Copy) {
+    from "../../../rns_bridge.py"
+    into rnsPythonDir
+}
+android.sourceSets.main.python.srcDir(rnsPythonDir)
+tasks.matching { it.name == "preBuild" || it.name.endsWith("PythonSources") }.configureEach { dependsOn "copyRnsBridge" }
 
 // To comply with F-Droid version code schema
 // https://github.com/localsend/localsend/issues/1534

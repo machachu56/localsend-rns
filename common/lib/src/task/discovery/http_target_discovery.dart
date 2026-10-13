@@ -1,3 +1,6 @@
+/// @deprecated Use RnsAnnounceService instead.
+/// Kept for backward compatibility with original LocalSend clients.
+
 import 'package:common/api_route_builder.dart';
 import 'package:common/constants.dart';
 import 'package:common/model/device.dart';
